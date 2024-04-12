@@ -1,0 +1,107 @@
+# 1. 创建ClusterRole--test-scheduler-clusterrole
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: test-scheduler-clusterrole
+rules:
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csistoragecapacities", "csidrivers", "csinodes"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces", "endpoints", "events", "nodes", "pods", "bindings", "pods/binding", "pods/status", "replicationcontrollers", "services", "persistentvolumeclaims", "persistentvolumes", "configmaps"]
+    verbs: ["get", "watch", "list", "create", "update", "delete", "patch"]
+  - apiGroups: ["apps", "extensions"]
+    resources: ["replicasets", "statefulsets"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "update"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+---
+# 2. 创建ServiceAccount--test-scheduler-sa
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-scheduler-sa
+  namespace: kube-system
+---
+# 3. 创建ClusterRoleBinding--ServiceAccount绑定 名为test-scheduler-clusterrole的ClusterRole
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: test-scheduler-clusterrolebinding
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: test-scheduler-clusterrole
+subjects:
+  - kind: ServiceAccount
+    name: test-scheduler-sa
+    namespace: kube-system
+
+---
+# 4. 创建ConfigMap--scheduler-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scheduler-config
+  namespace: kube-system
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      resourceLock: leases
+    profiles:
+    - schedulerName: test-scheduler
+      plugins:
+        score:
+          enabled:
+          - name: MyScorePlugin
+---
+# 5. 部署自定义插件（Deployment方式）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-scheduler
+  namespace: kube-system
+  labels:
+    component: test-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: test-scheduler
+  template:
+    metadata:
+      labels:
+        component: test-scheduler
+    spec:
+      serviceAccount: test-scheduler-sa
+      # 要将 Pod 标记为关键性（critical），设置 Pod 的 priorityClassName 为 system-cluster-critical 或者 system-node-critical。
+      # system-node-critical 是最高级别的可用性优先级，甚至比 system-cluster-critical 更高。
+      priorityClassName: system-cluster-critical
+      volumes:
+        - name: scheduler-config
+          configMap:
+            name: scheduler-config
+      containers:
+        - name: test-scheduler
+          image: registry.cn-hangzhou.aliyuncs.com/asheno/my-scheduler:v6
+          imagePullPolicy: IfNotPresent
+          args:
+            - test-scheduler
+            - --config=/etc/kubernetes/scheduler-config.yaml
+            - --v=3
+          resources:
+            requests:
+              cpu: "50m"
+          volumeMounts:
+            - name: scheduler-config
+              mountPath: /etc/kubernetes

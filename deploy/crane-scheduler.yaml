@@ -1,0 +1,204 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crane-system
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: crane-scheduler-clusterrole
+rules:
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csistoragecapacities", "csidrivers", "csinodes"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces", "endpoints", "events", "nodes", "pods", "bindings", "pods/binding", "pods/status", "replicationcontrollers", "services", "persistentvolumeclaims", "persistentvolumes", "configmaps"]
+    verbs: ["get", "watch", "list", "create", "update", "delete", "patch"]
+  - apiGroups: ["apps", "extensions"]
+    resources: ["replicasets", "statefulsets"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "update"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: crane-scheduler-sa
+  namespace: crane-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crane-scheduler-clusterrolebinding
+  namespace: crane-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crane-scheduler-clusterrole
+subjects:
+  - kind: ServiceAccount
+    name: crane-scheduler-sa
+    namespace: crane-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scheduler-config
+  namespace: crane-system
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1beta2
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+    profiles:
+    - schedulerName: crane-scheduler
+      plugins:
+        filter:
+          enabled:
+          - name: Dynamic
+        score:
+          enabled:
+          - name: Dynamic
+            weight: 3
+      pluginConfig:
+      - name: Dynamic
+        args:
+          policyConfigPath: /etc/kubernetes/policy.yaml
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dynamic-scheduler-policy
+  namespace: crane-system
+data:
+  policy.yaml: |
+    apiVersion: scheduler.policy.crane.io/v1alpha1
+    kind: DynamicSchedulerPolicy
+    spec:
+      syncPolicy:
+        ##cpu usage
+        - name: cpu_usage_avg_5m
+          period: 3m
+        - name: cpu_usage_max_avg_1h
+          period: 15m
+        - name: cpu_usage_max_avg_1d
+          period: 3h
+        ##memory usage
+        - name: mem_usage_avg_5m
+          period: 3m
+        - name: mem_usage_max_avg_1h
+          period: 15m
+        - name: mem_usage_max_avg_1d
+          period: 3h
+
+      predicate:
+        ##cpu usage
+        - name: cpu_usage_avg_5m
+          maxLimitPecent: 0.65
+        - name: cpu_usage_max_avg_1h
+          maxLimitPecent: 0.75
+        ##memory usage
+        - name: mem_usage_avg_5m
+          maxLimitPecent: 0.65
+        - name: mem_usage_max_avg_1h
+          maxLimitPecent: 0.75
+
+      priority:
+        ###score = sum(() * weight) / len,  0 <= score <= 10
+        ##cpu usage
+        - name: cpu_usage_avg_5m
+          weight: 0.2
+        - name: cpu_usage_max_avg_1h
+          weight: 0.3
+        - name: cpu_usage_max_avg_1d
+          weight: 0.5
+        ##memory usage
+        - name: mem_usage_avg_5m
+          weight: 0.2
+        - name: mem_usage_max_avg_1h
+          weight: 0.3
+        - name: mem_usage_max_avg_1d
+          weight: 0.5
+
+      hotValue:
+        - timeRange: 5m
+          count: 5
+        - timeRange: 1m
+          count: 2
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crane-scheduler
+  namespace: crane-system
+  labels:
+    component: scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: scheduler
+  template:
+    metadata:
+      labels:
+        component: scheduler
+    spec:
+      volumes:
+        - name: scheduler-config
+          configMap:
+            name: scheduler-config
+            defaultMode: 420
+        - name: dynamic-scheduler-policy
+          configMap:
+            name: dynamic-scheduler-policy
+            defaultMode: 420
+      containers:
+        - name: crane-scheduler
+          image: docker.io/gocrane/crane-scheduler:0.0.23
+          command:
+            - /scheduler
+            - --leader-elect=true
+            - --config=/etc/kubernetes/kube-scheduler/scheduler-config.yaml
+          resources:
+            requests:
+              cpu: 200m
+          volumeMounts:
+            - name: scheduler-config
+              readOnly: true
+              mountPath: /etc/kubernetes/kube-scheduler
+            - name: dynamic-scheduler-policy
+              readOnly: true
+              mountPath: /etc/kubernetes
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 10259
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 10259
+              scheme: HTTPS
+      restartPolicy: Always
+      dnsPolicy: ClusterFirst
+      serviceAccountName: crane-scheduler-sa
+      serviceAccount: crane-scheduler-sa
+
+

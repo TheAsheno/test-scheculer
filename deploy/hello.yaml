@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello
+  template:
+    metadata:
+      labels:
+        app: hello
+    spec:
+      schedulerName: test-scheduler
+      containers:
+      - name: hello
+        image: kicbase/echo-server:1.0
+        imagePullPolicy: IfNotPresent
